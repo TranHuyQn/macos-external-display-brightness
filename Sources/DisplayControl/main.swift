@@ -8,28 +8,43 @@ final class MockDDCDevice: DDCDevice, @unchecked Sendable {
     var writtenValues: [Int] = []
     var readThreads: [Bool] = [] // Records Thread.isMainThread for each read
     var shouldFailReadCount: Int = 0
+    var alwaysFailRead: Bool = false
+    var readValue: (current: Int, max: Int) = (0, 100)
     let delayMicros: UInt32
 
-    init(delayMicros: UInt32 = 4000, shouldFailReadCount: Int = 0) {
+    init(
+        delayMicros: UInt32 = 4000,
+        shouldFailReadCount: Int = 0,
+        alwaysFailRead: Bool = false,
+        readValue: (Int, Int) = (0, 100)
+    ) {
         self.delayMicros = delayMicros
         self.shouldFailReadCount = shouldFailReadCount
+        self.alwaysFailRead = alwaysFailRead
+        self.readValue = readValue
     }
 
     func readBrightness() throws -> (current: Int, max: Int) {
-        usleep(delayMicros)
+        if delayMicros > 0 {
+            usleep(delayMicros)
+        }
         lock.lock()
         defer { lock.unlock() }
         readThreads.append(Thread.isMainThread)
 
-        if shouldFailReadCount > 0 {
-            shouldFailReadCount -= 1
+        if alwaysFailRead || shouldFailReadCount > 0 {
+            if shouldFailReadCount > 0 {
+                shouldFailReadCount -= 1
+            }
             throw DDCError.readFailed
         }
-        return (current: 0, max: 100)
+        return readValue
     }
 
     func writeBrightness(_ value: Int) throws {
-        usleep(delayMicros)
+        if delayMicros > 0 {
+            usleep(delayMicros)
+        }
         lock.lock()
         writeCount += 1
         writtenValues.append(value)
@@ -205,7 +220,130 @@ func runSelfTest() -> Int32 {
     }
     print("    Verified: Initial read failure was retried asynchronously and recovered successfully")
 
-    print("✔ All self-test scenarios passed successfully!")
+    // -------------------------------------------------------------
+    // Test 4 (Kịch bản A): Mixed sequence (5 up, 3 down, 2 up)
+    // with background refresh returning stale value (50);
+    // asserts final brightness is NOT overwritten by stale 50!
+    // -------------------------------------------------------------
+    print("[Self-Test 4 / Kịch bản A] Testing mixed key sequence with background refresh returning stale value...")
+    let slowRefreshDDC = MockDDCDevice(delayMicros: 40_000, readValue: (current: 50, max: 100))
+    let mixedController = AppController(
+        settings: settings,
+        isVerbose: false,
+        minInterval: 0.04,
+        ddcLocator: { _ in slowRefreshDDC },
+        screenProvider: { [mockBuiltInScreen, mockExternalScreen] },
+        mouseLocationProvider: { CGPoint(x: 2000, y: 500) },
+        osdPanel: nil
+    )
+    // Initial brightness = 50, scale max = 100
+    mixedController.setCustomDDC(slowRefreshDDC, scale: BrightnessScale(max: 100)!, initialBrightness: 50, displayID: 2)
+
+    // Trigger slow background refresh that will return (current: 50, max: 100) after 40ms
+    mixedController.triggerAsyncRefreshIfNeeded(force: true)
+
+    // While refresh is reading DDC on ddcQueue, user presses:
+    // 5 up, 3 down, 2 up
+    // Sequence: 50 -> 56 -> 63 -> 69 -> 75 -> 81 -> 75 -> 69 -> 63 -> 69 -> 75
+    for _ in 1...5 { _ = mixedController.handle(.up) }
+    for _ in 1...3 { _ = mixedController.handle(.down) }
+    for _ in 1...2 { _ = mixedController.handle(.up) }
+
+    // Wait 250ms for slow background refresh and DDC writes to complete
+    usleep(250_000)
+
+    let finalBrightness = mixedController.currentBrightness ?? -1
+    print("    Final brightness: \(finalBrightness) (expected 75, not overwritten by stale 50)")
+
+    guard finalBrightness == 75 else {
+        fputs("FAIL: Kịch bản A failed! Expected 75, got \(finalBrightness). Refresh overwrote newer value!\n", stderr)
+        return 1
+    }
+    print("    Verified: Generation counter prevented stale refresh from jumping brightness backwards")
+
+    // -------------------------------------------------------------
+    // Test 5 (Kịch bản B): Mock DDC whose first handle is broken
+    // (all reads fail); locator returns healthy handle on 2nd call;
+    // asserts app automatically recovers and scale is populated.
+    // -------------------------------------------------------------
+    print("[Self-Test 5 / Kịch bản B] Testing recovery from broken DDC handle via locator re-query...")
+    let brokenHandleDDC = MockDDCDevice(delayMicros: 2000, alwaysFailRead: true)
+    let healthyHandleDDC = MockDDCDevice(delayMicros: 2000, readValue: (current: 60, max: 100))
+
+    final class LocatorTracker: @unchecked Sendable {
+        private let lock = NSLock()
+        var callCount = 0
+        let brokenDDC: MockDDCDevice
+        let healthyDDC: MockDDCDevice
+
+        init(broken: MockDDCDevice, healthy: MockDDCDevice) {
+            self.brokenDDC = broken
+            self.healthyDDC = healthy
+        }
+
+        func locate(id: UInt32) -> DDCDevice? {
+            lock.lock()
+            defer { lock.unlock() }
+            callCount += 1
+            if callCount == 1 {
+                return brokenDDC
+            } else {
+                return healthyDDC
+            }
+        }
+    }
+
+    let tracker = LocatorTracker(broken: brokenHandleDDC, healthy: healthyHandleDDC)
+    let recoveryController = AppController(
+        settings: settings,
+        isVerbose: false,
+        minInterval: 0.04,
+        ddcLocator: { tracker.locate(id: $0) },
+        screenProvider: { [mockBuiltInScreen, mockExternalScreen] },
+        mouseLocationProvider: { CGPoint(x: 2000, y: 500) },
+        osdPanel: nil
+    )
+
+    // Call handle -> triggers refresh with Call #1 (brokenHandleDDC)
+    _ = recoveryController.handle(.up)
+    usleep(50_000)
+
+    guard recoveryController.currentScale == nil else {
+        fputs("FAIL: Kịch bản B: currentScale should be nil when brokenHandleDDC fails\n", stderr)
+        return 1
+    }
+    guard recoveryController.activeDDC == nil else {
+        fputs("FAIL: Kịch bản B: activeDDC should be discarded (nil) when read fails\n", stderr)
+        return 1
+    }
+
+    // Wait past 1.0s throttle window
+    sleep(2)
+
+    // Call handle -> triggers refresh; because activeDDC is nil, calls ddcLocator again (Call #2 -> healthyHandleDDC)
+    _ = recoveryController.handle(.up)
+    usleep(80_000)
+
+    guard tracker.callCount >= 2 else {
+        fputs("FAIL: Kịch bản B: ddcLocator was not called again! callCount = \(tracker.callCount)\n", stderr)
+        return 1
+    }
+    guard recoveryController.currentScale != nil else {
+        fputs("FAIL: Kịch bản B: currentScale should be recovered and non-nil\n", stderr)
+        return 1
+    }
+    guard recoveryController.activeDDC != nil else {
+        fputs("FAIL: Kịch bản B: activeDDC should now be healthyHandleDDC\n", stderr)
+        return 1
+    }
+
+    guard recoveryController.handle(.up) else {
+        fputs("FAIL: Kịch bản B: handle(.up) should now consume successfully\n", stderr)
+        return 1
+    }
+    print("    Verified: Broken handle was discarded and healthy handle was obtained via locator retry (calls: \(tracker.callCount))")
+
+    print("✔ All self-test scenarios (1, 2, 3, A, B) passed successfully!")
     return 0
 }
 

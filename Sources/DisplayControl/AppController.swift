@@ -24,7 +24,9 @@ final class AppController {
     private let lock = NSLock()
     private var state = CachedState()
     private var isRefreshing = false
+    private var needsRefreshAgain = false
     private var lastRefreshAttemptTime: TimeInterval = 0
+    private var brightnessGeneration: UInt64 = 0
 
     private(set) var totalKeyEvents: Int = 0
     private(set) var totalActualWrites: Int = 0
@@ -112,8 +114,18 @@ final class AppController {
 
     func triggerAsyncRefreshIfNeeded(force: Bool = false) {
         let now = ProcessInfo.processInfo.systemUptime
+
+        // Sample screen provider on main thread if caller is on main thread
+        var callerScreens: [ScreenInfo]? = nil
+        if Thread.isMainThread {
+            callerScreens = screenProvider()
+        }
+
         lock.lock()
         if isRefreshing {
+            if force {
+                needsRefreshAgain = true
+            }
             lock.unlock()
             return
         }
@@ -126,19 +138,39 @@ final class AppController {
         lock.unlock()
 
         ddcQueue.async { [weak self] in
-            self?.performBackgroundRefresh()
+            self?.performBackgroundRefresh(screensHint: callerScreens)
         }
     }
 
-    private func performBackgroundRefresh() {
-        let screens = screenProvider()
+    private func performBackgroundRefresh(screensHint: [ScreenInfo]? = nil) {
+        let screens: [ScreenInfo]
+        if let hint = screensHint {
+            screens = hint
+        } else if Thread.isMainThread {
+            screens = screenProvider()
+        } else {
+            var fetched: [ScreenInfo] = []
+            DispatchQueue.main.sync {
+                fetched = self.screenProvider()
+            }
+            screens = fetched
+        }
+
         guard let ext = screens.first(where: { !$0.isBuiltIn }) else {
             lock.lock()
             state = CachedState()
-            isRefreshing = false
+            let runAgain = needsRefreshAgain
+            needsRefreshAgain = false
+            isRefreshing = runAgain
             lock.unlock()
+
             if isVerbose {
                 print("[AppController] No external display detected.")
+            }
+            if runAgain {
+                ddcQueue.async { [weak self] in
+                    self?.performBackgroundRefresh()
+                }
             }
             return
         }
@@ -153,41 +185,82 @@ final class AppController {
             state.ddc = nil
             state.scale = nil
             state.displayID = nil
-            isRefreshing = false
+            let runAgain = needsRefreshAgain
+            needsRefreshAgain = false
+            isRefreshing = runAgain
             lock.unlock()
+
             if isVerbose {
                 print("[AppController] Could not locate DDC for external display id \(ext.id).")
             }
+            if runAgain {
+                ddcQueue.async { [weak self] in
+                    self?.performBackgroundRefresh()
+                }
+            }
             return
         }
+
+        lock.lock()
+        let readStartGeneration = brightnessGeneration
+        let currentCachedBrightness = state.brightness
+        let cachedDisplayID = state.displayID
+        lock.unlock()
 
         do {
             let (current, max) = try validDDC.readBrightness()
             guard let scale = BrightnessScale(max: max) else {
                 throw DDCError.invalidRange
             }
+
             lock.lock()
             state.ddc = validDDC
             state.scale = scale
-            state.brightness = current
             state.displayID = ext.id
-            isRefreshing = false
+
+            // Only overwrite brightness if no key events modified it while reading DDC,
+            // or if this is the initial read / screen changed.
+            let shouldUpdateBrightness = (currentCachedBrightness == nil) || (cachedDisplayID != ext.id) || (brightnessGeneration == readStartGeneration)
+
+            if shouldUpdateBrightness {
+                state.brightness = current
+                settings.lastValue = current
+            }
+
+            let runAgain = needsRefreshAgain
+            needsRefreshAgain = false
+            isRefreshing = runAgain
             lock.unlock()
 
-            settings.lastValue = current
             if isVerbose {
-                print("[AppController] External display detected & read: id=\(ext.id), brightness=\(current), max=\(max)")
+                print("[AppController] External display detected & read: id=\(ext.id), brightness=\(current), max=\(max), updatedBrightness=\(shouldUpdateBrightness)")
+            }
+
+            if runAgain {
+                ddcQueue.async { [weak self] in
+                    self?.performBackgroundRefresh()
+                }
             }
         } catch {
             lock.lock()
-            state.ddc = validDDC
-            state.scale = nil // Will trigger retry on subsequent key attempt
+            // Discard broken handle so subsequent attempt re-locates a fresh handle via ddcLocator
+            state.ddc = nil
+            state.scale = nil
             state.displayID = ext.id
-            isRefreshing = false
+
+            let runAgain = needsRefreshAgain
+            needsRefreshAgain = false
+            isRefreshing = runAgain
             lock.unlock()
 
             if isVerbose {
                 print("[AppController] Failed to read brightness via DDC: \(error)")
+            }
+
+            if runAgain {
+                ddcQueue.async { [weak self] in
+                    self?.performBackgroundRefresh()
+                }
             }
         }
     }
@@ -198,6 +271,7 @@ final class AppController {
         state.scale = scale
         state.brightness = initialBrightness
         state.displayID = displayID
+        brightnessGeneration &+= 1
         lock.unlock()
     }
 
@@ -233,6 +307,7 @@ final class AppController {
 
             lock.lock()
             state.brightness = newVal
+            brightnessGeneration &+= 1
             lock.unlock()
 
             settings.lastValue = newVal
