@@ -6,13 +6,25 @@ final class MockDDCDevice: DDCDevice, @unchecked Sendable {
     private let lock = NSLock()
     var writeCount: Int = 0
     var writtenValues: [Int] = []
+    var readThreads: [Bool] = [] // Records Thread.isMainThread for each read
+    var shouldFailReadCount: Int = 0
     let delayMicros: UInt32
 
-    init(delayMicros: UInt32 = 4000) {
+    init(delayMicros: UInt32 = 4000, shouldFailReadCount: Int = 0) {
         self.delayMicros = delayMicros
+        self.shouldFailReadCount = shouldFailReadCount
     }
 
     func readBrightness() throws -> (current: Int, max: Int) {
+        usleep(delayMicros)
+        lock.lock()
+        defer { lock.unlock() }
+        readThreads.append(Thread.isMainThread)
+
+        if shouldFailReadCount > 0 {
+            shouldFailReadCount -= 1
+            throw DDCError.readFailed
+        }
         return (current: 0, max: 100)
     }
 
@@ -26,7 +38,7 @@ final class MockDDCDevice: DDCDevice, @unchecked Sendable {
 }
 
 func runSelfTest() -> Int32 {
-    print("==> Running AppController --self-test (100 rapid key events with mock DDC)...")
+    print("==> Running AppController --self-test...")
     let suiteName = "SelfTestSuite-\(UUID().uuidString)"
     guard let defaults = UserDefaults(suiteName: suiteName) else {
         fputs("ERROR: Failed to create test UserDefaults\n", stderr)
@@ -47,7 +59,53 @@ func runSelfTest() -> Int32 {
         isBuiltIn: true
     )
 
-    var currentMouse = CGPoint(x: 100, y: 100)
+    // -------------------------------------------------------------
+    // Test 1: handle() when cache is empty returns false immediately
+    // and triggers background refresh WITHOUT blocking main thread
+    // -------------------------------------------------------------
+    print("[Self-Test 1] Testing uninitialized cache behavior on main thread...")
+    var currentMouse = CGPoint(x: 2000, y: 500)
+    let freshController = AppController(
+        settings: settings,
+        isVerbose: false,
+        minInterval: 0.04,
+        ddcLocator: { _ in mockDDC },
+        screenProvider: { [mockBuiltInScreen, mockExternalScreen] },
+        mouseLocationProvider: { currentMouse },
+        osdPanel: nil
+    )
+
+    let t0 = CFAbsoluteTimeGetCurrent()
+    let initialConsumed = freshController.handle(.up)
+    let handleElapsedMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000.0
+
+    guard !initialConsumed else {
+        fputs("FAIL: handle() must return false when cache is not yet ready\n", stderr)
+        return 1
+    }
+    guard handleElapsedMs < 20.0 else {
+        fputs("FAIL: handle() took \(handleElapsedMs) ms, which blocked main thread!\n", stderr)
+        return 1
+    }
+    print(String(format: "    handle() returned false immediately in %.2f ms", handleElapsedMs))
+
+    // Wait for background refresh on ddcQueue to finish
+    usleep(80_000)
+
+    guard !mockDDC.readThreads.isEmpty else {
+        fputs("FAIL: Background refresh did not trigger readBrightness()\n", stderr)
+        return 1
+    }
+    guard !mockDDC.readThreads.contains(true) else {
+        fputs("FAIL: readBrightness() was executed on MAIN thread!\n", stderr)
+        return 1
+    }
+    print("    Verified: readBrightness() was executed on background queue (never main thread)")
+
+    // -------------------------------------------------------------
+    // Test 2: 100 rapid key events on external screen with valid cache
+    // -------------------------------------------------------------
+    print("[Self-Test 2] Testing rapid 100 key presses with LatestWinsWriter...")
     let controller = AppController(
         settings: settings,
         isVerbose: false,
@@ -59,14 +117,14 @@ func runSelfTest() -> Int32 {
     )
     controller.setCustomDDC(mockDDC, scale: BrightnessScale(max: 100)!, initialBrightness: 0, displayID: 2)
 
-    // Test 1: mouse on built-in screen must return false
-    let builtInResult = controller.handle(.up)
-    guard !builtInResult else {
-        fputs("FAIL: Mouse on built-in screen must return false (not consumed)\n", stderr)
+    // Test mouse on built-in screen
+    currentMouse = CGPoint(x: 100, y: 100)
+    guard !controller.handle(.up) else {
+        fputs("FAIL: Mouse on built-in screen must return false\n", stderr)
         return 1
     }
 
-    // Test 2: mouse on external screen with 100 rapid events
+    // 100 rapid events on external screen
     currentMouse = CGPoint(x: 2000, y: 500)
     for i in 1...100 {
         let consumed = controller.handle(.up)
@@ -76,15 +134,12 @@ func runSelfTest() -> Int32 {
         }
     }
 
-    // Allow background writer to drain (minInterval = 40ms, total ~80ms)
+    // Allow background writer to drain
     usleep(250_000)
 
     let actualWrites = mockDDC.writeCount
     let lastValue = mockDDC.writtenValues.last ?? -1
-
-    print("Total key events submitted: 100")
-    print("Actual DDC writes performed: \(actualWrites)")
-    print("Final brightness value written: \(lastValue)")
+    print("    Key events: 100 -> Actual DDC writes: \(actualWrites), Final value: \(lastValue)")
 
     guard actualWrites < 10 else {
         fputs("FAIL: Expected actual writes < 10, got \(actualWrites)\n", stderr)
@@ -95,7 +150,62 @@ func runSelfTest() -> Int32 {
         return 1
     }
 
-    print("✔ Self-test passed successfully! (writes < 10 and final value == 100)")
+    // -------------------------------------------------------------
+    // Test 3: Flaky read on first attempt, then retry succeeds
+    // -------------------------------------------------------------
+    print("[Self-Test 3] Testing retry after failed initial read...")
+    let flakyDDC = MockDDCDevice(delayMicros: 2000, shouldFailReadCount: 1)
+    let retryController = AppController(
+        settings: settings,
+        isVerbose: false,
+        minInterval: 0.04,
+        ddcLocator: { _ in flakyDDC },
+        screenProvider: { [mockBuiltInScreen, mockExternalScreen] },
+        mouseLocationProvider: { CGPoint(x: 2000, y: 500) },
+        osdPanel: nil
+    )
+
+    // First attempt triggers background refresh that fails
+    _ = retryController.handle(.up)
+    usleep(50_000)
+
+    // Scale must still be nil because read failed
+    guard retryController.currentScale == nil else {
+        fputs("FAIL: currentScale should be nil after failed read\n", stderr)
+        return 1
+    }
+
+    // Next handle immediately should still return false without waiting
+    guard !retryController.handle(.up) else {
+        fputs("FAIL: handle() should return false when scale is nil\n", stderr)
+        return 1
+    }
+
+    // Advance past the 1.0s throttle window to allow retry
+    sleep(2)
+
+    // Calling handle now triggers async retry
+    _ = retryController.handle(.up)
+    usleep(80_000)
+
+    // Retry succeeded on background thread!
+    guard retryController.currentScale != nil else {
+        fputs("FAIL: retryController should have acquired valid scale after retry\n", stderr)
+        return 1
+    }
+    guard !flakyDDC.readThreads.contains(true) else {
+        fputs("FAIL: Retry read was executed on main thread!\n", stderr)
+        return 1
+    }
+
+    // Subsequent handle should now succeed
+    guard retryController.handle(.up) else {
+        fputs("FAIL: handle() should now consume event after successful retry\n", stderr)
+        return 1
+    }
+    print("    Verified: Initial read failure was retried asynchronously and recovered successfully")
+
+    print("✔ All self-test scenarios passed successfully!")
     return 0
 }
 
@@ -150,7 +260,7 @@ if args.contains("--self-test") {
 } else if args.contains("--log-keys") {
     let trusted = hasAccessibilityPermission(prompt: false)
     print("Accessibility permission: \(trusted)")
-    let tap = BrightnessKeyTap { direction in
+    let tap = BrightnessKeyTap(isVerbose: isVerbose) { direction in
         print("key: \(direction)")
         return false
     }
@@ -181,7 +291,7 @@ if args.contains("--self-test") {
         exit(1)
     }
 
-    let osd = OSDPanel()
+    let osd = OSDPanel(isVerbose: true)
     DispatchQueue.main.async {
         osd.show(level: 8, steps: 16, on: targetScreen)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {

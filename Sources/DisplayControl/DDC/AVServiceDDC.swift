@@ -1,27 +1,29 @@
 // Verified on macOS 26.5.2 (Darwin 25.5.0, Apple Silicon M1 Pro)
 import Foundation
 import IOKit
-
-typealias IOAVServiceRef = UnsafeMutableRawPointer
+import DisplayCore
 
 @_silgen_name("IOAVServiceCreateWithService")
-func IOAVServiceCreateWithService(_ allocator: CFAllocator?, _ service: io_service_t) -> IOAVServiceRef?
+func IOAVServiceCreateWithService(_ allocator: CFAllocator?, _ service: io_service_t) -> Unmanaged<CFTypeRef>?
 
 @_silgen_name("IOAVServiceReadI2C")
-func IOAVServiceReadI2C(_ service: IOAVServiceRef, _ chipAddress: UInt32, _ dataAddress: UInt32, _ buffer: UnsafeMutableRawPointer, _ length: UInt32) -> Int32
+func IOAVServiceReadI2C(_ service: CFTypeRef, _ chipAddress: UInt32, _ dataAddress: UInt32, _ buffer: UnsafeMutableRawPointer, _ length: UInt32) -> Int32
 
 @_silgen_name("IOAVServiceWriteI2C")
-func IOAVServiceWriteI2C(_ service: IOAVServiceRef, _ chipAddress: UInt32, _ dataAddress: UInt32, _ buffer: UnsafeRawPointer, _ length: UInt32) -> Int32
+func IOAVServiceWriteI2C(_ service: CFTypeRef, _ chipAddress: UInt32, _ dataAddress: UInt32, _ buffer: UnsafeRawPointer, _ length: UInt32) -> Int32
 
 final class AVServiceDDC: DDCDevice, @unchecked Sendable {
-    private let avService: IOAVServiceRef
+    private let avService: CFTypeRef
     private let chipAddress: UInt32
     private let dataAddress: UInt32 = 0x51
     private let vcpBrightness: UInt8 = 0x10
 
-    init(avService: IOAVServiceRef, chipAddress: UInt32) {
+    private(set) var maxBrightness: Int = 100
+
+    init(avService: CFTypeRef, chipAddress: UInt32, initialMax: Int = 100) {
         self.avService = avService
         self.chipAddress = chipAddress
+        self.maxBrightness = initialMax
     }
 
     func readBrightness() throws -> (current: Int, max: Int) {
@@ -56,6 +58,7 @@ final class AVServiceDDC: DDCDevice, @unchecked Sendable {
                     guard parsed.max > 0 else {
                         throw DDCError.invalidRange
                     }
+                    self.maxBrightness = parsed.max
                     return (current: parsed.current, max: parsed.max)
                 }
             }
@@ -72,7 +75,7 @@ final class AVServiceDDC: DDCDevice, @unchecked Sendable {
     }
 
     func writeBrightness(_ value: Int) throws {
-        let clampedValue = max(0, min(100, value))
+        let clampedValue = clampBrightness(value, max: maxBrightness)
         let high = UInt8((clampedValue >> 8) & 0xFF)
         let low = UInt8(clampedValue & 0xFF)
 

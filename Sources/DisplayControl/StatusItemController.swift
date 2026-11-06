@@ -5,14 +5,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private let settings: Settings
     private let appController: AppController
     private let onToggleIcon: (Bool) -> Void
+    var onCheckPermission: (() -> Void)?
 
     private var statusItem: NSStatusItem?
     private let menu = NSMenu()
 
-    init(settings: Settings, appController: AppController, onToggleIcon: @escaping (Bool) -> Void) {
+    init(settings: Settings, appController: AppController, onToggleIcon: @escaping (Bool) -> Void, onCheckPermission: (() -> Void)? = nil) {
         self.settings = settings
         self.appController = appController
         self.onToggleIcon = onToggleIcon
+        self.onCheckPermission = onCheckPermission
         super.init()
         self.menu.delegate = self
     }
@@ -40,6 +42,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        onCheckPermission?()
         rebuildMenu()
     }
 

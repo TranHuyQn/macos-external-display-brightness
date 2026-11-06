@@ -2,12 +2,17 @@ import AppKit
 import QuartzCore
 
 final class OSDPanel {
+    private let isVerbose: Bool
     private var window: NSPanel?
     private var progressLayer: CALayer?
     private var levelTextLayer: CATextLayer?
     private var hideWorkItem: DispatchWorkItem?
 
     private let panelSize = CGSize(width: 200, height: 200)
+
+    init(isVerbose: Bool = false) {
+        self.isVerbose = isVerbose
+    }
 
     private func createPanelIfNeeded() -> NSPanel {
         if let existing = window {
@@ -102,8 +107,10 @@ final class OSDPanel {
 
         panel.orderFrontRegardless()
 
-        let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
-        print(String(format: "[OSD] show() latency: %.2f ms (level: %d/%d)", elapsedMs, clampedLevel, steps))
+        if isVerbose {
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000.0
+            print(String(format: "[OSD] show() latency: %.2f ms (level: %d/%d)", elapsedMs, clampedLevel, steps))
+        }
 
         let workItem = DispatchWorkItem { [weak self] in
             self?.window?.orderOut(nil)

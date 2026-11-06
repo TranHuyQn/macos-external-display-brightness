@@ -34,4 +34,16 @@ struct BrightnessScaleTests {
         #expect(scale.stepped(from: 0, direction: .down) == 0)
         #expect(scale.stepped(from: 50, direction: .up) == 56)
     }
+
+    @Test func clampBrightnessFunction() {
+        #expect(clampBrightness(50, max: 100) == 50)
+        #expect(clampBrightness(120, max: 100) == 100)
+        #expect(clampBrightness(-10, max: 100) == 0)
+        #expect(clampBrightness(200, max: 255) == 200)
+        #expect(clampBrightness(300, max: 255) == 255)
+        #expect(clampBrightness(10, max: 5) == 5)
+        #expect(clampBrightness(-5, max: 5) == 0)
+        // Degenerate max <= 0 defaults to effectiveMax = 1
+        #expect(clampBrightness(5, max: 0) == 1)
+    }
 }

@@ -51,3 +51,10 @@ public struct BrightnessScale: Sendable {
         return self.value(forLevel: targetLvl)
     }
 }
+
+/// Clamps a brightness value between 0 and max (where max is at least 1).
+public func clampBrightness(_ value: Int, max: Int) -> Int {
+    let effectiveMax = Swift.max(1, max)
+    return Swift.max(0, Swift.min(effectiveMax, value))
+}
+

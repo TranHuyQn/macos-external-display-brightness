@@ -15,6 +15,10 @@ func getDDCChipAddress(for service: io_service_t) -> UInt32 {
     return 0x37
 }
 
+/// Locates the external DDC device for the given display ID.
+/// Note: On Apple Silicon M1 Pro with a single external monitor connected via HDMI,
+/// any non-builtin display routes through the sole external DCPAVServiceProxy
+/// driven by the AppleDCPMCDP29XX bridge.
 func locateExternalDDC(for displayID: CGDirectDisplayID) -> DDCDevice? {
     guard CGDisplayIsBuiltin(displayID) == 0 else {
         return nil
@@ -41,7 +45,8 @@ func locateExternalDDC(for displayID: CGDirectDisplayID) -> DDCDevice? {
         if let location = IORegistryEntryCreateCFProperty(service, "Location" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String,
            location == "External" {
             let chipAddr = getDDCChipAddress(for: service)
-            if let avService = IOAVServiceCreateWithService(kCFAllocatorDefault, service) {
+            if let unmanaged = IOAVServiceCreateWithService(kCFAllocatorDefault, service) {
+                let avService = unmanaged.takeRetainedValue()
                 return AVServiceDDC(avService: avService, chipAddress: chipAddr)
             }
         }

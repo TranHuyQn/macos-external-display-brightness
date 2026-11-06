@@ -11,11 +11,14 @@ func hasAccessibilityPermission(prompt: Bool = false) -> Bool {
 
 final class BrightnessKeyTap {
     private let shouldConsume: (Direction) -> Bool
+    private let isVerbose: Bool
     private var machPort: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var isConsumingCurrentPress = false
+    private(set) var isStarted = false
 
-    init(shouldConsume: @escaping (Direction) -> Bool) {
+    init(isVerbose: Bool = false, shouldConsume: @escaping (Direction) -> Bool) {
+        self.isVerbose = isVerbose
         self.shouldConsume = shouldConsume
     }
 
@@ -25,6 +28,10 @@ final class BrightnessKeyTap {
 
     @discardableResult
     func start(prompt: Bool = true) -> Bool {
+        if isStarted && machPort != nil {
+            return true
+        }
+
         guard hasAccessibilityPermission(prompt: prompt) else {
             return false
         }
@@ -39,7 +46,7 @@ final class BrightnessKeyTap {
             eventsOfInterest: mask,
             callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
                 guard let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 let tap = Unmanaged<BrightnessKeyTap>.fromOpaque(refcon).takeUnretainedValue()
                 return tap.handleEvent(proxy: proxy, type: type, event: event)
@@ -54,6 +61,7 @@ final class BrightnessKeyTap {
         self.runLoopSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
+        self.isStarted = true
         return true
     }
 
@@ -66,23 +74,26 @@ final class BrightnessKeyTap {
             }
             machPort = nil
         }
+        isStarted = false
     }
 
     func handleEvent(proxy: CGEventTapProxy?, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let port = machPort {
                 CGEvent.tapEnable(tap: port, enable: true)
-                print("tap re-enabled")
+                if isVerbose {
+                    print("[KeyTap] tap re-enabled")
+                }
             }
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         guard type.rawValue == 14 else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         guard let nsEvent = NSEvent(cgEvent: event), nsEvent.subtype.rawValue == 8 else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         let data1 = nsEvent.data1
@@ -93,7 +104,7 @@ final class BrightnessKeyTap {
 
         // 2 = Brightness Up, 3 = Brightness Down
         guard keyCode == 2 || keyCode == 3 else {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
 
         let direction: Direction = (keyCode == 2) ? .up : .down
@@ -111,7 +122,7 @@ final class BrightnessKeyTap {
             }
         }
 
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
 
     func simulateDisable() {
