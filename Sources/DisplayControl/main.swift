@@ -2,9 +2,110 @@ import Foundation
 import AppKit
 import DisplayCore
 
-let args = CommandLine.arguments
+final class MockDDCDevice: DDCDevice, @unchecked Sendable {
+    private let lock = NSLock()
+    var writeCount: Int = 0
+    var writtenValues: [Int] = []
+    let delayMicros: UInt32
 
-if args.contains("--ddc-read") {
+    init(delayMicros: UInt32 = 4000) {
+        self.delayMicros = delayMicros
+    }
+
+    func readBrightness() throws -> (current: Int, max: Int) {
+        return (current: 0, max: 100)
+    }
+
+    func writeBrightness(_ value: Int) throws {
+        usleep(delayMicros)
+        lock.lock()
+        writeCount += 1
+        writtenValues.append(value)
+        lock.unlock()
+    }
+}
+
+func runSelfTest() -> Int32 {
+    print("==> Running AppController --self-test (100 rapid key events with mock DDC)...")
+    let suiteName = "SelfTestSuite-\(UUID().uuidString)"
+    guard let defaults = UserDefaults(suiteName: suiteName) else {
+        fputs("ERROR: Failed to create test UserDefaults\n", stderr)
+        return 1
+    }
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let settings = Settings(defaults: defaults)
+    let mockDDC = MockDDCDevice()
+    let mockExternalScreen = ScreenInfo(
+        id: 2,
+        frame: CGRect(x: 1512, y: 0, width: 1920, height: 1200),
+        isBuiltIn: false
+    )
+    let mockBuiltInScreen = ScreenInfo(
+        id: 1,
+        frame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        isBuiltIn: true
+    )
+
+    var currentMouse = CGPoint(x: 100, y: 100)
+    let controller = AppController(
+        settings: settings,
+        isVerbose: false,
+        minInterval: 0.04,
+        ddcLocator: { _ in mockDDC },
+        screenProvider: { [mockBuiltInScreen, mockExternalScreen] },
+        mouseLocationProvider: { currentMouse },
+        osdPanel: nil
+    )
+    controller.setCustomDDC(mockDDC, scale: BrightnessScale(max: 100)!, initialBrightness: 0, displayID: 2)
+
+    // Test 1: mouse on built-in screen must return false
+    let builtInResult = controller.handle(.up)
+    guard !builtInResult else {
+        fputs("FAIL: Mouse on built-in screen must return false (not consumed)\n", stderr)
+        return 1
+    }
+
+    // Test 2: mouse on external screen with 100 rapid events
+    currentMouse = CGPoint(x: 2000, y: 500)
+    for i in 1...100 {
+        let consumed = controller.handle(.up)
+        if !consumed {
+            fputs("FAIL: Event #\(i) on external screen was not consumed\n", stderr)
+            return 1
+        }
+    }
+
+    // Allow background writer to drain (minInterval = 40ms, total ~80ms)
+    usleep(250_000)
+
+    let actualWrites = mockDDC.writeCount
+    let lastValue = mockDDC.writtenValues.last ?? -1
+
+    print("Total key events submitted: 100")
+    print("Actual DDC writes performed: \(actualWrites)")
+    print("Final brightness value written: \(lastValue)")
+
+    guard actualWrites < 10 else {
+        fputs("FAIL: Expected actual writes < 10, got \(actualWrites)\n", stderr)
+        return 1
+    }
+    guard lastValue == 100 else {
+        fputs("FAIL: Expected final value 100, got \(lastValue)\n", stderr)
+        return 1
+    }
+
+    print("✔ Self-test passed successfully! (writes < 10 and final value == 100)")
+    return 0
+}
+
+let args = CommandLine.arguments
+let isVerbose = args.contains("--verbose")
+
+if args.contains("--self-test") {
+    let code = runSelfTest()
+    exit(code)
+} else if args.contains("--ddc-read") {
     guard let external = currentScreens().first(where: { !$0.isBuiltIn }) else {
         fputs("notFound\n", stderr)
         exit(1)
@@ -51,7 +152,7 @@ if args.contains("--ddc-read") {
     print("Accessibility permission: \(trusted)")
     let tap = BrightnessKeyTap { direction in
         print("key: \(direction)")
-        return false // let all keys through
+        return false
     }
     if args.contains("--simulate-disable") {
         tap.simulateDisable()
@@ -92,5 +193,9 @@ if args.contains("--ddc-read") {
     }
     app.run()
 } else {
-    print("DisplayControl version \(DisplayCorePlaceholder.version)")
+    // Normal launch: run NSApplication with AppDelegate
+    let app = NSApplication.shared
+    let delegate = AppDelegate(isVerbose: isVerbose)
+    app.delegate = delegate
+    app.run()
 }

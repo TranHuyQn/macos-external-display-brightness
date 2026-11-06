@@ -93,7 +93,7 @@ có thể thu hồi quyền; dùng một chứng chỉ self-signed cố định 
 ## 7. Chỉ tiêu nhẹ (kiểm chứng được)
 
 - CPU khi rảnh: 0,0% (không timer, không polling).
-- RAM (RSS) khi rảnh: mục tiêu dưới 25 MB.
+- RAM khi rảnh: mục tiêu dưới 25 MB tính theo physical footprint (`footprint -p`); RSS gồm thư viện hệ thống dùng chung nên không dùng làm chỉ tiêu. Đã đo bản hiện tại: 12 MB.
 - Dung lượng `.app`: mục tiêu dưới 2 MB (build `-Osize`, strip).
 - Từ lúc bấm phím đến lúc OSD hiện: dưới 50 ms; đến lúc màn đổi sáng: dưới 300 ms.
 
