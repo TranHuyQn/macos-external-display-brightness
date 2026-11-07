@@ -91,7 +91,7 @@ Màn hình: ASUS PA248QV cắm **trực tiếp** vào cổng HDMI tích hợp c�
 
 - **Step 6: Đo thời gian thực tế & khoảng nghỉ**
   - 20 lệnh ghi liên tiếp (xen kẽ 40 và 60, kết thúc ở 80):
-    - Min: 3.427 ms
+    - Nhỏ nhất: 3.427 ms
     - Avg: 3.655 ms
     - Max: 6.473 ms
   - Thử nghiệm khoảng nghỉ giữa 2 lệnh ghi:

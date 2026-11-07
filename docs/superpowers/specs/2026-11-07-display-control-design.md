@@ -1,11 +1,11 @@
 # Display Control — Tài liệu thiết kế
 
-Ngày: 2026-11-07 · Chủ dự án: Huy · Trạng thái: đã duyệt ý tưởng, chờ kế hoạch triển khai
+Ngày: 2026-11-07 · Trạng thái: đã hoàn thành
 
 ## 1. Mục đích
 
-Huy dùng MacBook Pro M1 Pro (macOS 26.5.2) với một màn rời ASUS PA248QV cắm qua HDMI.
-Huy đã gỡ BetterDisplay vì (1) trả phí, muốn có app miễn phí của riêng mình và có thể
+Tác giả dùng MacBook Pro M1 Pro (macOS 26.5.2) với một màn rời ASUS PA248QV cắm qua HDMI.
+Tác giả đã gỡ BetterDisplay vì (1) trả phí, muốn có app miễn phí của riêng mình và có thể
 open source sau này, (2) chỉ cần đúng một chức năng: chỉnh độ sáng màn rời.
 
 Mục tiêu: một app native nhỏ trên menu bar, chỉnh **độ sáng phần cứng thật** của màn rời
@@ -35,14 +35,14 @@ bằng phím F1/F2 như cách macOS chỉnh màn MacBook.
 
 ## 5. Ràng buộc và quyết định đã chốt
 
-Do Huy chốt:
+Quyết định của chủ dự án:
 - Chuột ở màn MacBook thì để macOS tự xử lý.
 - Giao diện: icon menu bar và thanh độ sáng (OSD) hiện khi bấm phím.
 - Một màn rời, HDMI. Dùng cá nhân trên máy này, ký ad-hoc/self-signed.
 - Màn rời phải **cắm trực tiếp vào cổng HDMI của MacBook, không qua hub/dock**. Qua hub thì ghi DDC báo lỗi `0xE0114102` (đã kiểm chứng 2026-11-07); cắm trực tiếp thì đọc DDC được.
 - Bước đầu tiên của kế hoạch là thử nghiệm xác nhận DDC chạy trên cổng HDMI này.
 
-Do Min đề xuất (Huy đã duyệt tổng thể):
+Quyết định kỹ thuật đã chọn:
 - Swift + AppKit, không SwiftUI, không thư viện ngoài. Build bằng Swift Package Manager với Command Line Tools (máy chưa có Xcode đầy đủ); tự đóng gói `.app` bằng script.
 - Bắt phím: event tap trên sự kiện phím hệ thống (`NX_SYSDEFINED`, subtype 8, keycode `NX_KEYTYPE_BRIGHTNESS_UP=2`, `DOWN=3`). Cần quyền Accessibility.
 - DDC: API riêng tư `IOAVService` (`IOAVServiceCreateWithService`, `IOAVServiceWriteI2C`, `IOAVServiceReadI2C`), chip addr `0x37` (mặc định) hoặc `0xB7` (cổng HDMI MacBook qua cầu MCDP29XX, nhận biết bằng `EPICProviderClass = AppleDCPMCDP29XX`; đã kiểm chứng trên máy này), data addr `0x51`, VCP `0x10`. Đây là cách duy nhất chạy trên Apple Silicon; rủi ro là Apple có thể đổi API trong bản macOS sau.
@@ -51,11 +51,11 @@ Do Min đề xuất (Huy đã duyệt tổng thể):
 - Tự khởi động cùng máy (`SMAppService`), tắt/bật được trong menu.
 - Menu: hiển thị tên màn rời + mức sáng hiện tại, bật/tắt khởi động cùng máy, bật/tắt icon, Thoát.
 
-Do Huy bổ sung (2026-11-07):
+Bổ sung (2026-11-07):
 - Có công tắc **ẩn/hiện icon menu bar**. Khi ẩn, F1/F2 và OSD vẫn hoạt động bình thường, app vẫn chạy nền.
-- Huy không cần icon. Muốn chỉnh gì thì **mở lại app** (Spotlight/Finder).
+- Không cần icon. Muốn chỉnh gì thì **mở lại app** (Spotlight/Finder).
 
-Do Min đoán (cần Huy xác nhận): mở lại app khi nó đang chạy sẽ hiện một **cửa sổ cài đặt nhỏ**
+Giả định đã được xác nhận: mở lại app khi nó đang chạy sẽ hiện một **cửa sổ cài đặt nhỏ**
 chứa: công tắc hiện icon, công tắc khởi động cùng máy, nút Thoát. Cửa sổ chỉ tạo khi cần và
 giải phóng khi đóng (không giữ RAM lúc rảnh). Công tắc icon cũng có trong menu bar khi icon đang hiện.
 
